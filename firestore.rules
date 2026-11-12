@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function profilePath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function hasProfile() { return signedIn() && exists(profilePath()); }
+    function me() { return get(profilePath()).data; }
+    function isActive() { return hasProfile() && me().status == 'active'; }
+    function isAdmin() { return isActive() && me().role == 'admin'; }
+    function isLecturer() { return isActive() && me().role == 'lecturer'; }
+    function isStudent() { return isActive() && me().role == 'student'; }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow read: if isAdmin();
+      allow read: if isLecturer() && resource.data.role == 'student';
+      allow create: if isAdmin() || (signedIn() && request.auth.uid == uid && validSelfRegistration());
+      allow update: if isAdmin() || (signedIn() && request.auth.uid == uid && courseLimitOk());
+      allow delete: if isAdmin();
+
+      function validSelfRegistration() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['email', 'role', 'firstName', 'surname', 'gender', 'phone', 'status', 'grade', 'staffNumber', 'courseIds', 'teachingAssignments', 'createdAt'])
+          && d.email.lower() == request.auth.token.email.lower()
+          && d.courseIds is list
+          && (
+               (d.role == 'student'
+                 && d.status == 'active'
+                 && d.grade is int && d.grade >= 8 && d.grade <= 12
+                 && ( (d.grade <= 9 && d.courseIds.size() <= 9) || (d.grade >= 10 && d.courseIds.size() <= 7) )
+               )
+               ||
+               (d.role == 'lecturer'
+                 && d.status == 'pending'
+                 && d.get('teachingAssignments', []) is list
+                 && d.get('teachingAssignments', []).size() >= 4)
+             );
+      }
+
+      function courseLimitOk() {
+        let d = request.resource.data;
+        return (d.role != 'student' || (
+                 d.grade is int && d.grade >= 8 && d.grade <= 12
+                 && ( (d.grade <= 9 && d.courseIds.size() <= 9) || (d.grade >= 10 && d.courseIds.size() <= 7) )
+               ))
+             && (d.role != 'lecturer'
+                 || (d.get('teachingAssignments', []) is list
+                     && d.get('teachingAssignments', []).size() >= 4));
+      }
+
+      match /private/{docId} {
+        allow read, write: if signedIn() && (request.auth.uid == uid || isAdmin());
+      }
+    }
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isAdmin();
+      match /resources/{resourceId} {
+        allow read: if signedIn() && (isAdmin() || isLecturer() || (isStudent() && resource.data.grade == me().grade));
+        allow write: if isAdmin() || (isLecturer() && courseId in me().courseIds);
+      }
+    }
+
+    match /schedules/{scheduleId} {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if isActive();
+      allow create: if isAdmin() || (isLecturer() && request.resource.data.authorId == request.auth.uid && request.resource.data.courseId is string && request.resource.data.courseId in me().courseIds);
+      allow update: if isAdmin();
+      allow delete: if isAdmin() || (signedIn() && resource.data.authorId == request.auth.uid);
+    }
+
+    match /nationalIds/{id} {
+      allow read, write: if signedIn();
+    }
+  }
+}
